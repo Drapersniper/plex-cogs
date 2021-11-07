@@ -1,0 +1,16 @@
+{
+    "author": ["Draper"],
+    "description": "A Cog to play content from the specified Plex Server.",
+    "install_msg": "Make sure to read the README.md in the repo.",
+    "short": "Play audio content from the specified Plex server.",
+    "tags": ["audio", "plex"],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores Plex auth for the specified user.",
+    "requirements" : [
+        "lyricsgenius==2.0.0",
+        "PlexAPI==4.7.2",
+        "ffmpeg==1.4",
+        "pynacl==1.4.0",
+        "fuzzywuzzy==0.18.0"
+    ]
+}
