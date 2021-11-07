@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import functools
 import io
 import logging
@@ -19,7 +20,7 @@ from plexapi.server import PlexServer
 from redbot.core import Config, commands
 from redbot.core.bot import Red
 
-from PlexMusic.exceptions import MediaNotFoundError, VoiceChannelError
+from .exceptions import MediaNotFoundError, VoiceChannelError
 
 log = logging.getLogger("red.plex-cogs.PlexMusic")
 
@@ -66,10 +67,12 @@ class PlexMusic(commands.Cog):
         self.play_next_event: Dict[int, asyncio.Event] = defaultdict(asyncio.Event)
 
         self.genius = None
-        self.bot.loop.create_task(self._audio_player_task())
+        self._task = None
 
     def cog_unload(self):
-        self.session.close()
+        if self._task:
+            self._task.cancel()
+        asyncio.create_task(self.session.close())
 
     async def red_delete_data_for_user(
         self,
@@ -99,7 +102,11 @@ class PlexMusic(commands.Cog):
                 server = PlexServer(url, token)
                 self.pms_cache[user_id] = PlexServer(url, token)
                 self.music_library[user_id] = next(
-                    (section for section in server.library.sections() if section.type == "artist"),
+                    iter(
+                        section
+                        for section in server.library.sections()
+                        if section.type == "artist"
+                    ),
                     None,
                 )
             except:
@@ -107,7 +114,7 @@ class PlexMusic(commands.Cog):
         elif user_id in self.pms_cache and user_id not in self.music_library:
             server = self.pms_cache[user_id]
             self.music_library[user_id] = next(
-                (section for section in server.library.sections() if section.type == "artist"),
+                iter(section for section in server.library.sections() if section.type == "artist"),
                 None,
             )
 
@@ -121,6 +128,8 @@ class PlexMusic(commands.Cog):
         await self.bot.wait_until_red_ready()
         await self._lyrics_genius_init()
         await self._init_global_plex()
+        self._task = self._audio_player_task()
+        self.bot.loop.create_task(self._task)
         self.cog_ready_event.set()
 
     async def _lyrics_genius_init(self, token: str = None):
@@ -128,7 +137,7 @@ class PlexMusic(commands.Cog):
             if not token:
                 token = await self.config.lyricsgenius()
             if token is not None:
-                self.genius = lyricsgenius.Genius(token)
+                self.genius = lyricsgenius.Genius(token)  # FIXME: Blocking call
                 return
         log.warning("No lyrics token specified, lyrics disabled")
         self.genius = None
@@ -143,26 +152,30 @@ class PlexMusic(commands.Cog):
                 url = global_data.get("url")
             if not all(i for i in [url, token, username, bot_id]):
                 log.fatal(
-                    "Missing global configuration make sure to run "
-                    f"'{next(await self.bot.get_valid_prefixes())}{self.command_config_global.qualified_name}' "
+                    "Missing global configuration make sure to run the following commands in DM "
+                    f"'{next(iter(await self.bot.get_valid_prefixes()))}{self.command_config_global.qualified_name}' "
                     "to setup the global configuration."
                 )
                 return
             server = PlexServer(url, token)
-            self.pms_cache[bot_id] = PlexServer(url, token)
+            self.pms_cache[bot_id] = PlexServer(url, token)  # FIXME: Blocking call
             self.music_library[bot_id] = next(
-                (section for section in server.library.sections() if section.type == "artist"),
+                (
+                    section for section in server.library.sections() if section.type == "artist"
+                ),  # FIXME: Blocking call
                 None,
             )
 
         except plexapi.exceptions.Unauthorized:
             log.fatal(
-                "Invalid global Plex auth. Make sure to run:  "
-                f"'{next(await self.bot.get_valid_prefixes())}{self.command_config_global.qualified_name}' "
+                "Invalid global Plex auth. Make sure to run the following commands in DM:  "
+                f"'{next(iter(await self.bot.get_valid_prefixes()))}{self.command_config_global.qualified_name}' "
                 "to setup the global configuration."
             )
 
-    def _search_tracks(self, ctx: commands.Context, title: str) -> plexapi.audio.Track:
+    def _search_tracks(
+        self, ctx: commands.Context, title: str, artist: str = None
+    ) -> plexapi.audio.Track:
         """
         Search the Plex music db for track
         Args:
@@ -176,7 +189,27 @@ class PlexMusic(commands.Cog):
             if not (musiclib := self.music_library.get(self.bot.user.id)):
                 raise MediaNotFoundError("Track cannot be found")
 
-        results = musiclib.searchTracks(title=title, maxresults=1)
+        if artist:
+            results = musiclib.searchTracks(
+                title=title,
+                maxresults=10,
+                sort="titleSort",
+                **{  # FIXME: Blocking call
+                    "track.title": title,
+                },
+            )
+            results = [
+                r for r in results if r.artist().title.lower() == artist.lower()
+            ]  # FIXME: Blocking call
+        else:
+            results = musiclib.searchTracks(
+                title=title,
+                sort="titleSort",
+                maxresults=1,
+                **{  # FIXME: Blocking call
+                    "track.title": title,
+                },
+            )
         try:
             return results[0]
         except IndexError:
@@ -195,7 +228,7 @@ class PlexMusic(commands.Cog):
         if not (musiclib := self.music_library.get(ctx.author.id)):
             if not (musiclib := self.music_library.get(self.bot.user.id)):
                 raise MediaNotFoundError("Track cannot be found")
-        results = musiclib.searchAlbums(title=title, maxresults=1)
+        results = musiclib.searchAlbums(title=title, maxresults=1)  # FIXME: Blocking call
         try:
             return results[0]
         except IndexError:
@@ -215,7 +248,7 @@ class PlexMusic(commands.Cog):
         """
         try:
             server = await self.get_context_server(ctx)
-            return server.playlist(title)
+            return server.playlist(title)  # FIXME: Blocking call
         except plexapi.exceptions.NotFound:
             raise MediaNotFoundError("Playlist cannot be found")
 
@@ -225,7 +258,7 @@ class PlexMusic(commands.Cog):
         Grabs the appropriate streaming URL, sends the `now playing`
         message, and initiates playback in the vc.
         """
-        track_url = self.current_track[guild_id].getStreamURL()
+        track_url = self.current_track[guild_id].getStreamURL()  # FIXME: Blocking call
         audio_stream = FFmpegPCMAudio(track_url)
 
         while self.voice_channel[guild_id].is_playing():
@@ -238,26 +271,32 @@ class PlexMusic(commands.Cog):
         log.debug("%s - URL: %s", self.current_track[guild_id], track_url)
 
         embed, img = await self._build_embed_track(self.current_track[guild_id])
+        if not embed:
+            return
         self.np_message_id[guild_id] = await self.ctx_cache[guild_id].send(embed=embed, file=img)
 
     async def _audio_player_task(self):
         await self.bot.wait_until_red_ready()
-        while True:
-            for k, voice_channel in self.voice_channel.items():
-                self.play_next_event[k].clear()
-                if voice_channel:
-                    try:
-                        # Disconnect after 15 seconds idle
-                        async with timeout(1):
-                            self.current_track[k] = await self.play_queue[k].get()
-                    except asyncio.TimeoutError:
+        with contextlib.suppress(asyncio.CancelledError):
+            while True:
+                await asyncio.sleep(0.5)
+                for k, voice_channel in self.voice_channel.items():
+                    await asyncio.sleep(0.1)
+                    self.play_next_event[k].clear()
+                    if voice_channel:
+                        try:
+                            # Disconnect after 15 seconds idle
+                            async with timeout(1):
+                                self.current_track[k] = await self.play_queue[k].get()
+                        except asyncio.TimeoutError:
+                            continue
+                    if not self.current_track.get(k):
+                        self.current_track[k] = await self.play_queue[k].get()
+                    await self._play(k)
+                    if not self.play_next_event[k].is_set():
                         continue
-                if not self.current_track.get(k):
-                    self.current_track[k] = await self.play_queue[k].get()
-                await self._play(k)
-                if not self.play_next_event[k].is_set():
-                    continue
-                await self.np_message_id[k].delete()
+                    with contextlib.suppress(discord.HTTPException):
+                        await self.np_message_id[k].delete()
 
     def _toggle_next(self, error=None, guild_id: int = None):
         """
@@ -286,10 +325,17 @@ class PlexMusic(commands.Cog):
             ValueError: Unsupported type of embed {type_}
         """
         # Grab the relevant thumbnail
-        async with self.session.get(track.thumbUrl) as resp:
-            img = io.BytesIO(await resp.read())
-        # Attach to discord embed
-        art_file = discord.File(img, filename="image0.png")
+
+        if not track:
+            return None, None
+        if not track.thumbUrl:
+            log.warning(f"{track.title} does not have a thumbnail")
+            art_file = None
+        else:
+            async with self.session.get(track.thumbUrl) as resp:
+                img = io.BytesIO(await resp.read())
+            # Attach to discord embed
+            art_file = discord.File(img, filename="image0.png")
         # Get appropiate status message
         if type_ == "play":
             title = f"Now Playing - {track.title}"
@@ -299,13 +345,14 @@ class PlexMusic(commands.Cog):
             raise ValueError(f"Unsupported type of embed {type_}")
 
         # Include song details
-        descrip = f"{track.album().title} - {track.artist().title}"
+        descrip = f"{track.album().title} - {track.artist().title}"  # FIXME: Blocking call
 
         # Build the actual embed
         embed = discord.Embed(title=title, description=descrip, colour=discord.Color.red())
-        embed.set_author(name="Plex")
-        # Point to file attached with ctx object.
-        embed.set_thumbnail(url="attachment://image0.png")
+        embed.set_author(name=self.bot.user.name)
+        if art_file:
+            # Point to file attached with ctx object.
+            embed.set_thumbnail(url="attachment://image0.png")
 
         log.debug("Built embed for track - %s", track.title)
 
@@ -326,17 +373,23 @@ class PlexMusic(commands.Cog):
             None
         """
         # Grab the relevant thumbnail
-        async with self.session.get(album.thumbUrl) as resp:
-            img = io.BytesIO(await resp.read())
-
-        # Attach to discord embed
-        art_file = discord.File(img, filename="image0.png")
+        if not album:
+            return None, None
+        if not album.thumbUrl:
+            log.warning(f"{album.title} does not have a thumbnail.")
+            art_file = None
+        else:
+            async with self.session.get(album.thumbUrl) as resp:
+                img = io.BytesIO(await resp.read())
+            # Attach to discord embed
+            art_file = discord.File(img, filename="image0.png")
         title = "Added album to queue"
-        descrip = f"{album.title} - {album.artist().title}"
+        descrip = f"{album.title} - {album.artist().title}"  # FIXME: Blocking call
 
         embed = discord.Embed(title=title, description=descrip, colour=discord.Color.red())
-        embed.set_author(name="Plex")
-        embed.set_thumbnail(url="attachment://image0.png")
+        embed.set_author(name=self.bot.user.name)
+        if art_file:
+            embed.set_thumbnail(url="attachment://image0.png")
         log.debug("Built embed for album - %s", album.title)
 
         return embed, art_file
@@ -346,17 +399,27 @@ class PlexMusic(commands.Cog):
     ):
         """"""
         # Grab the relevant thumbnail
-        server = await self.get_context_server(ctx)
-        async with self.session.get(server.url(playlist.composite, True)) as resp:
-            img = io.BytesIO(await resp.read())
-        # Attach to discord embed
-        art_file = discord.File(img, filename="image0.png")
+
+        if not playlist:
+            return None, None
+        if not playlist.composite:
+            log.debug(f"{playlist.title} does not have a composite image.")
+            art_file = None
+        else:
+            server = await self.get_context_server(ctx)
+            async with self.session.get(server.url(playlist.composite, True)) as resp:
+                img = io.BytesIO(await resp.read())
+            # Attach to discord embed
+            art_file = discord.File(img, filename="image0.png")
+
         title = "Added playlist to queue"
         descrip = f"{playlist.title}"
 
         embed = discord.Embed(title=title, description=descrip, colour=discord.Color.red())
-        embed.set_author(name="Plex")
-        embed.set_thumbnail(url="attachment://image0.png")
+        embed.set_author(name=self.bot.user.name)
+        if art_file:
+            embed.set_thumbnail(url="attachment://image0.png")
+
         log.debug("Built embed for playlist - %s", playlist.title)
 
         return embed, art_file
@@ -379,6 +442,14 @@ class PlexMusic(commands.Cog):
 
         # Connect to voice if not already
         if not self.voice_channel.get(ctx.guild.id):
+            if ctx.guild.me.voice:
+                key_id, _ = ctx.guild.me.voice.channel._get_voice_client_key()
+                state = ctx.guild.me.voice.channel._state
+                if client := state._get_voice_client(key_id):
+                    self.voice_channel[ctx.guild.id] = client
+                    log.debug("Already connected to vc (%d).", self.voice_channel[ctx.guild.id])
+                    return
+
             self.voice_channel[ctx.guild.id] = await ctx.author.voice.channel.connect()
             log.debug("Connected to vc (%d).", self.voice_channel[ctx.guild.id])
 
@@ -430,10 +501,10 @@ class PlexMusic(commands.Cog):
     @commands.is_owner()
     @commands.dm_only()
     @command_config.group(name="global")
-    async def command_config_global(self, ctx: commands.Context, plex_email: str, password: str):
+    async def command_config_global(self, ctx: commands.Context):
         """Configure the global plex server and lyrics settings."""
 
-    @command_config_global.group(name="auth")
+    @command_config_global.command(name="auth")
     async def command_config_global_auth(
         self, ctx: commands.Context, plex_email: str, password: str, server_url: str
     ):
@@ -464,30 +535,31 @@ class PlexMusic(commands.Cog):
             "Successfully authenticated as {user.email} ({user.username}).".format(user=user)
         )
 
-    @command_config_global.group(name="lyrics")
-    async def command_config_global_auth(self, ctx: commands.Context, *, token: str):
+    @command_config_global.command(name="lyrics")
+    async def command_config_global_lyrics(self, ctx: commands.Context, *, token: str):
         """Set a Lyrics Genius token -
         You can get one here: https://genius.com/signup_or_login
         """
         await self.config.lyricsgenius.set(token)
         await ctx.send(f"Token set to: {token}")
-        await self._lyrics_genius_init(token)
+        await self._lyrics_genius_init(token)  # FIXME: Blocking call
 
     @commands.guild_only()
     @commands.command()
-    async def play(self, ctx: commands.Context, *, title: str):
+    async def play(self, ctx: commands.Context, title: str, artists: str = None):
         """
         User command to play song
         Searches plex and either, initiates playback, or
         adds to queue. Handles invalid usage from the user.
         Arguments:
             title: Title of song to play
+            artists: The singers name
         """
         # Save the context to use with async callbacks
         self.ctx_cache[ctx.guild.id] = ctx
 
         try:
-            track = self._search_tracks(ctx, title)
+            track = self._search_tracks(ctx, title, artists)  # FIXME: Blocking call
         except MediaNotFoundError:
             await ctx.send(f"Can't find song: {title}")
             log.debug("Failed to play, can't find song - %s", title)
@@ -496,13 +568,16 @@ class PlexMusic(commands.Cog):
         try:
             await self._validate(ctx)
         except VoiceChannelError:
-            pass
+            return
 
         # Specific add to queue message
         if self.voice_channel[ctx.guild.id].is_playing():
             log.debug("Added to queue - %s", title)
-            embed, img = await self._build_embed_track(track, type_="queue")
-            await ctx.send(embed=embed, file=img)
+            embed, img = await self._build_embed_track(
+                track, type_="queue"
+            )  # FIXME: Blocking call
+            if embed:
+                await ctx.send(embed=embed, file=img)
 
         # Add the song to the async queue
         await self.play_queue[ctx.guild.id].put(track)
@@ -521,7 +596,7 @@ class PlexMusic(commands.Cog):
         self.ctx_cache[ctx.guild.id] = ctx
 
         try:
-            album = self._search_albums(ctx, title)
+            album = self._search_albums(ctx, title)  # FIXME: Blocking call
         except MediaNotFoundError:
             await ctx.send(f"Can't find album: {title}")
             log.debug("Failed to queue album, can't find - %s", title)
@@ -530,11 +605,12 @@ class PlexMusic(commands.Cog):
         try:
             await self._validate(ctx)
         except VoiceChannelError:
-            pass
+            return await ctx.send("First join a voice channel.")
 
         log.debug("Added to queue - %s", title)
-        embed, img = await self._build_embed_album(album)
-        await ctx.send(embed=embed, file=img)
+        embed, img = await self._build_embed_album(album)  # FIXME: Blocking call
+        if embed:
+            await ctx.send(embed=embed, file=img)
         for track in album.tracks():
             await self.play_queue[ctx.guild.id].put(track)
 
@@ -551,7 +627,7 @@ class PlexMusic(commands.Cog):
         """
 
         try:
-            playlist = await self._search_playlists(ctx, title)
+            playlist = await self._search_playlists(ctx, title)  # FIXME: Blocking call
         except MediaNotFoundError:
             await ctx.send(f"Can't find playlist: {title}")
             log.debug("Failed to queue playlist, can't find - %s", title)
@@ -560,11 +636,12 @@ class PlexMusic(commands.Cog):
         try:
             await self._validate(ctx)
         except VoiceChannelError:
-            pass
+            return
 
         log.debug("Added to queue - %s", title)
-        embed, img = await self._build_embed_playlist(ctx, playlist)
-        await ctx.send(embed=embed, file=img)
+        embed, img = await self._build_embed_playlist(ctx, playlist)  # FIXME: Blocking call
+        if embed:
+            await ctx.send(embed=embed, file=img)
 
         for item in playlist.items():
             if item.TYPE == "track":
@@ -635,8 +712,10 @@ class PlexMusic(commands.Cog):
         Deletes old `now playing` status message,
         Creates a new one with up to date information.
         """
-        if track := self.current_track[ctx.guild.id].get(ctx.guild.id):
-            embed, img = await self._build_embed_track(track)
+        if track := self.current_track.get(ctx.guild.id):
+            embed, img = await self._build_embed_track(track)  # FIXME: Blocking call
+            if not embed:
+                return
             log.debug("Now playing")
             if np_message_id := self.np_message_id.get(ctx.guild.id):
                 await np_message_id.delete()
@@ -660,20 +739,20 @@ class PlexMusic(commands.Cog):
     async def lyrics(self, ctx: commands.Context):
         """User command to get lyrics of a song."""
         if (track := self.current_track.get(ctx.guild.id)) is None:
-            log.info("No song currently playing")
+            await ctx.send("No song currently playing.")
             return
 
         if self.genius:
-            log.info(
-                "Searching for %s, %s",
-                track.title,
-                track.artist().title,
-            )
+            await ctx.send(
+                f"Searching for {track.title}, {track.artist().title}."
+            )  # FIXME: Blocking call
             try:
-                song = self.genius.search_song(track.title, track.artist().title)
+                song = self.genius.search_song(
+                    track.title, track.artist().title
+                )  # FIXME: Blocking call
             except TypeError:
                 self.genius = None
-                log.error("Invalid genius token, disabling lyrics")
+                await ctx.send(f"Lyrics extension is currently disabled.")
                 return
 
             try:
@@ -690,7 +769,6 @@ class PlexMusic(commands.Cog):
                     await ctx.send(i)
 
             except (IndexError, TypeError):
-                log.info("Could not find lyrics")
                 await ctx.send("Can't find lyrics for this song.")
         else:
-            log.warning("Attempted lyrics without valid token")
+            await ctx.send(f"Lyrics extension is currently disabled.")

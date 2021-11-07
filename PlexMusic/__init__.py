@@ -12,4 +12,3 @@ async def setup(bot: Red):
     cog = PlexMusic(bot)
     bot.add_cog(cog)
     asyncio.create_task(cog._init())
-
