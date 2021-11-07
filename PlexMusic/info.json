@@ -1,7 +1,7 @@
 {
     "author": ["Draper"],
     "description": "A Cog to play content from the specified Plex Server.",
-    "install_msg": "Make sure to read the README.md in the repo.",
+    "install_msg": "The cog in its current state uses a blocking library, that being said it shouldn't be a huge issue if your bot isn't in many servers, open to PR's to handle the blocking calls.",
     "short": "Play audio content from the specified Plex server.",
     "tags": ["audio", "plex"],
     "type": "COG",
